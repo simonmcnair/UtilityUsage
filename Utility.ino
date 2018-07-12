@@ -1,53 +1,64 @@
-/*
-   Copyright (c) 2015, Majenko Technologies
-   All rights reserved.
 
-   Redistribution and use in source and binary forms, with or without modification,
-   are permitted provided that the following conditions are met:
 
- * * Redistributions of source code must retain the above copyright notice, this
-     list of conditions and the following disclaimer.
+// This is for an Amica NodeMCU so some of the LED logic is reversed.
 
- * * Redistributions in binary form must reproduce the above copyright notice, this
-     list of conditions and the following disclaimer in the documentation and/or
-     other materials provided with the distribution.
 
- * * Neither the name of Majenko Technologies nor the names of its
-     contributors may be used to endorse or promote products derived from
-     this software without specific prior written permission.
-
-   THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-   ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-   WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-   DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
-   ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
-   (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-   LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
-   ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-   (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-   SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-*/
 ADC_MODE(ADC_VCC);
 
 #include <ESP8266WiFi.h>
 #include <WiFiClient.h>
 #include <ESP8266WebServer.h>
-#include <ESP8266mDNS.h>
+//#include <ESP8266mDNS.h>
 #include <WiFiUdp.h>
 #include <TimeLib.h>
+#include <ESP8266HTTPClient.h>
 
-const char *ssid = "asdad";
-const char *password = "werwerrr";
+// #define DEBUG 1
+
+
+const char *ssid = "####";
+const char *password = "####";
 
 unsigned long mydatetime;
 unsigned int localPort = 2390;      // local port to listen for UDP packets
-long debouncing_time = 250; //Debouncing Time in Milliseconds
-volatile unsigned long last_micros;
+long debouncing_time = 100; //Debouncing Time in Milliseconds
+
+//Elec Variables
+const byte  Elec_LDRPin = 4; //D2
+const float Elec_StandingCharge = 18.375;
+const float Elec_UnitCharge = 11.760;
+const int   Elec_LDRBlinksPerKWH = 1000;
+
+volatile float         PowerKW = 0;
 volatile unsigned long NumberOfKWH = 0;
-volatile unsigned long Timebetweenblinks = 0;
-volatile unsigned long flashrate = 0;
-volatile unsigned long TimeLastblinked = 0;
-volatile float PowerKW = 0;
+volatile unsigned long Elec_TimeLastblinked = 0;
+volatile int           Elec_LDRBlink = 0;
+volatile bool          Elec_Meterblinked = false;
+
+//Gas Variables
+volatile float         GASflashrate = 0;
+volatile unsigned long GASTimeLastblinked = 0;
+volatile float         GasCharge = 0;
+volatile int           GASLDRBlink = 0;
+volatile bool          GASMeterblinked = false;
+
+// 1 pulse every 10dm3 = .01m3
+// 1000 pulses = 1m3 = 11kWh
+const float            GasStandingCharge = 18.9;
+const float            GasUnitCharge = 2.756; //1dm3 is equal to 11.1868KWH, 11.36266
+const byte             GASLDRPin = 5; //D1
+const char				GaSRemoteServer = "Dellboy";
+const char				GaSRemoteServerURL;
+const char				GaSRemoteServer;
+const char				GaSRemoteServer;
+
+const int            led = 2;
+int                  ledState = LOW;             // ledState used to set the LED
+unsigned long        previousMillis = 0;        // will store last time LED was updated
+const long           interval = 1000;           // interval at which to blink (milliseconds)
+
+ESP8266WebServer server ( 80 );
+
 
 time_t getNtpTime();
 void digitalClockDisplay();
@@ -57,7 +68,6 @@ void sendNTPpacket(IPAddress &address);
 
 /* Don't hardwire the IP address or we won't get the benefits of the pool.
     Lookup the IP address for the host name instead */
-//IPAddress timeServer(129, 6, 15, 28); // time.nist.gov NTP server
 IPAddress timeServerIP; // time.nist.gov NTP server address
 const char* ntpServerName = "pool.ntp.org";
 const int timeZone = 1;
@@ -68,43 +78,41 @@ byte packetBuffer[ NTP_PACKET_SIZE]; //buffer to hold incoming and outgoing pack
 // A UDP instance to let us send and receive packets over UDP
 WiFiUDP udp;
 
-ESP8266WebServer server ( 80 );
-
-const int led = 13;
-const byte ReedswitchPin = 5; //D1
-const byte LDRPin = 4; //D2
-const int LDRBlinksPerKWH = 1000;
-int LDRBlink = 0;
-
-void handleRoot() {
-  digitalWrite ( led, 1 );
+void handleRoot()
+{
+  //Serial.println(String(micros()) + "Http connection requested");
   //char temp[400];
-  int sec = millis() / 1000;
-  int min = sec / 60;
-  int hr = min / 60;
+  long sec = millis() / 1000;
+  long min = sec / 60;
+  long hr = min / 60;
+  long days = hr / 24;
 
-
-  String  myresult =  " <html><head><meta http-equiv='refresh' content='5'/><title>ESP8266 Demo</title><style>body { background-color: #cccccc; font-family: Arial, Helvetica, Sans-Serif; Color: #000088; }";
-  myresult += "</style></head><body><h1>Hello Simon !</h1><img src=/test.svg /><br>";
-  myresult += "Uptime: " + String(hr) + ":" + String(min) + ":" + String(sec) + "<br>";
+  String  myresult =  " <html><head><meta http-equiv='refresh' content='5'/><title>Gas and Electric Meter</title><style>body { background-color: #cccccc; font-family: Arial, Helvetica, Sans-Serif; Color: #000088; }";
+  myresult += "</style></head><body><h1>Gas and Electric Meter Readings</h1><br>";
+  //myresult += "<img src=/test.svg /><br>";
+  myresult += "Uptime: " + String(days) + " days.  " + String(printDigits(hr % 24)) + ":" + String(printDigits(min % 60)) + ":" + String(printDigits(sec % 60)) + "<br>";
   myresult += "Time: " + String(digitalClock()) + "<br>";
   myresult += "Date: " + String(digitalDate()) + "<br>";
   myresult += "ESP ChipId: " + String(ESP.getChipId()) + "<br>";
-  myresult += "KWH: " + String(NumberOfKWH) + "<BR>";
-  myresult += "LDR Blinks: " + String(LDRBlink) + "<BR>";
+  myresult += "ESP ChipSize: " + String(ESP.getFlashChipSize()) + "<br>";
+  myresult += "KWH: " + String(NumberOfKWH) + "." + String(Elec_LDRBlink) + "<BR>";
+  float Currentcost = Elec_StandingCharge + ((NumberOfKWH + (float)(Elec_LDRBlink / 1000.0)) * Elec_UnitCharge);
+  myresult += "ElectricityCost = " + String(Currentcost, 6) + "<br>";
+  myresult += "Power Usage (Watts): " + String(PowerKW * 1000) + "<BR>";
+  myresult += "Gas Meter count: " + String(GASLDRBlink) + "<BR>";
+  myresult += "https://standards.globalspec.com/std/1329584/din-43864<BR>" ;
 
   float voltage = ESP.getVcc();
   myresult += "Voltage: " + String(voltage) + "V<br>";
   myresult += "</body></html>";
 
-
   server.send ( 200, "text/html", myresult );
   //myresult =  ;
-  digitalWrite ( led, 0 );
 }
 
-void handleNotFound() {
-  digitalWrite ( led, 1 );
+void handleNotFound()
+{
+  //digitalWrite ( led, 1 );
   String message = "File Not Found\n\n";
   message += "URI: ";
   message += server.uri();
@@ -113,14 +121,272 @@ void handleNotFound() {
   message += "\nArguments: ";
   message += server.args();
   message += "\n";
-  for ( uint8_t i = 0; i < server.args(); i++ ) {
+  for ( uint8_t i = 0; i < server.args(); i++ )
+  {
     message += " " + server.argName ( i ) + ": " + server.arg ( i ) + "\n";
   }
   server.send ( 404, "text/plain", message );
-  digitalWrite ( led, 0 );
+  //digitalWrite ( led, 0 );
 }
 
-time_t getNtpTime() {
+
+
+void GASLDRfunction()
+{
+  unsigned long GASnewTime = micros() - GASTimeLastblinked;
+  if (GASnewTime >= debouncing_time * 1000)
+  {
+    GASLDRBlink++;
+    Serial.println(":  GASLDR Blink Count: " + String(GASLDRBlink));
+
+    GASflashrate = float((micros() - GASTimeLastblinked));
+    Serial.println(String(micros()) + "GAS LDRcounter = Elec_LDRBlinksPerKWH reset counter");
+
+    GASTimeLastblinked = micros();
+    GASMeterblinked = true;
+  }
+  else
+  {
+    Serial.println("GAS Debounce: Last blinked at " + String(GASTimeLastblinked) + "Ms. Millis is now: " + String((long)micros()) + "Ms. Difference is " + (long)(micros() - GASTimeLastblinked) + "ms. debounce period is " + String(debouncing_time * 1000));
+  }
+}
+
+void ElecLDRfunction()
+{
+  unsigned long Elec_newTime = micros() - Elec_TimeLastblinked;
+
+  //   Serial.println("Elec_newtime:" + String(Elec_newTime));
+
+  if (Elec_newTime >= debouncing_time * 1000)
+  {
+    Elec_LDRBlink++;
+    Serial.println(":  Elec_LDR Blink Count: " + String(Elec_LDRBlink));
+
+
+    if (Elec_newTime > 0)
+    {
+      PowerKW = (3600 / (float)Elec_newTime); //Power (kW) = 3600 (secs in 1hr) divided by (the seconds between flashes * number of Imp/kWh printed on meter)
+      //Serial.println("powerKW:" + String(PowerKW));
+      PowerKW = PowerKW * Elec_LDRBlinksPerKWH;
+      //Serial.println("powerKW:" + String(PowerKW));
+      Serial.println("Elec Flashrate interval = " + String((float)Elec_newTime / 1000000) + "s.  Power consumption = " + String(PowerKW * 1000) + "W (" + String(PowerKW) + "KW.)  KWH used: " + String(NumberOfKWH) );
+    }
+    if (Elec_LDRBlink == Elec_LDRBlinksPerKWH)
+    {
+      Elec_LDRBlink = 0;
+      NumberOfKWH++;
+      Serial.println(String(micros()) + " Elec_LDRcounter = Elec_LDRBlinksPerKWH reset counter");
+    }
+    Elec_TimeLastblinked = micros();
+    Elec_Meterblinked = true;
+  }
+  else
+  {
+    Serial.println("Elec Debounce: Last blinked at " + String(Elec_TimeLastblinked) + "Ms. Millis is now: " + String((long)micros()) + "Ms. Difference is " + (long)(micros() - Elec_TimeLastblinked) + "ms. debounce period is " + String(debouncing_time * 1000) + "ms");
+  }
+}
+
+void setup ()
+{
+  interrupts();
+  sei ();
+
+  pinMode ( led, OUTPUT );
+  pinMode ( LED_BUILTIN, OUTPUT );
+
+
+  pinMode(GASLDRPin, INPUT_PULLUP); //D0
+  attachInterrupt(digitalPinToInterrupt(GASLDRPin), GASLDRfunction, CHANGE);
+
+  pinMode(Elec_LDRPin, INPUT_PULLUP); //D1
+  attachInterrupt(digitalPinToInterrupt(Elec_LDRPin), ElecLDRfunction, CHANGE);
+
+
+  Serial.begin ( 115200 );
+  //     digitalWrite ( led, 0 );
+  WiFi.mode ( WIFI_STA );
+  WiFi.begin ( ssid, password );
+  Serial.println ( "Waiting For WiFi " );
+  // Wait for connection
+  while ( WiFi.status() != WL_CONNECTED )
+  {
+    delay ( 500 );
+    Serial.print ( "." );
+  }
+  Serial.println ("");
+  Serial.println ( "Connected to ");
+  Serial.println ( ssid );
+  Serial.println ( "IP address: " );
+  Serial.println ( WiFi.localIP() );
+
+  //Serial.println ( "DNS to ");
+  //Serial.println ( String(WiFi.dns1) );
+
+
+  WiFi.printDiag(Serial);
+  // if ( MDNS.begin ( "esp8266" ) )
+  // {
+  //   Serial.println ( "MDNS responder started" );
+  // }
+  Serial.println("Starting UDP");
+  udp.begin(localPort);
+  Serial.print("Local port: ");
+  Serial.println(udp.localPort());
+
+  setSyncProvider(getNtpTime);
+  setSyncInterval(300);
+
+  server.on ( "/", handleRoot );
+  //server.on ( "/test.svg", drawGraph );
+  server.on ( "/inline", []() {
+    server.send ( 200, "text/plain", "this works as well" );
+  } );
+  server.onNotFound ( handleNotFound );
+  server.begin();
+  Serial.println ( "HTTP server started" );
+
+  //   digitalWrite ( led, 1 );
+}
+
+time_t prevDisplay = 0; // when the digital clock was displayed
+
+
+void loop ()
+{
+  server.handleClient();
+  //Yes I do Serial.print("do I ever get here ? ");
+  //Serial.println("Result : " + getNtpTime());
+  if (timeStatus() != timeNotSet)
+  {
+    if (now() != prevDisplay)
+    { //update the display only if time has changed
+      // digitalWrite ( led, 0 );
+      prevDisplay = now();
+      digitalClock();
+      // digitalWrite ( led, 1 );
+    }
+  }
+
+  // Electric Meter counter
+  if (Elec_Meterblinked == true) {
+    Serial.println("Started Posting Electric Meter");
+    digitalWrite ( LED_BUILTIN, LOW );
+
+    HTTPClient http;
+    http.begin("http://192.168.1.240:80/GasAndElectric/Elec.php?ElecReading=1");
+
+    int httpCode = http.GET();
+    String payload = http.getString();
+    if (httpCode > 0) {
+      // HTTP header has been send and Server response header has been handled
+      Serial.printf("[HTTP] GET... code: %d\n", httpCode);
+
+      // file found at server
+      if (httpCode == HTTP_CODE_OK) {
+        //    String payload = http.getString();
+        //Serial.println(payload);
+        Serial.println("Http ok");
+      }
+    } else {
+      Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
+    }
+    //Serial.println(payload);    //Print request response payload
+
+    http.end();
+    Elec_Meterblinked = false;
+    digitalWrite ( LED_BUILTIN, HIGH );
+    Serial.println("Finished Posting Electric Meter");
+  }
+  // Gas Meter Counter
+
+  if (GASMeterblinked == true) {
+    Serial.println("Started Posting Gas Meter");
+    //digitalWrite ( LED_BUILTIN, LOW );
+
+    HTTPClient http;
+    http.begin("http://192.168.1.240:80/GasAndElectric/Gas.php?GasReading=1");
+
+    int httpCode = http.GET();
+    String payload = http.getString();
+    if (httpCode > 0) {
+      // HTTP header has been send and Server response header has been handled
+      Serial.printf("[HTTP] GET... code: %d\n", httpCode);
+
+      // file found at server
+      if (httpCode == HTTP_CODE_OK) {
+        //    String payload = http.getString();
+        Serial.println(payload);
+      }
+    } else {
+      Serial.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
+    }
+    Serial.println(payload);    //Print request response payload
+
+    http.end();
+    GASMeterblinked = false;
+    Serial.println("Finished Posting Gas Meter");
+    //digitalWrite ( LED_BUILTIN, HIGH );
+  }
+
+
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - previousMillis >= interval) {
+    // save the last time you blinked the LED
+    previousMillis = currentMillis;
+
+    // if the LED is off turn it on and vice-versa:
+    if (ledState == LOW) {
+      ledState = HIGH;
+    } else {
+      ledState = LOW;
+    }
+
+    // set the LED with the ledState of the variable:
+    digitalWrite(led, ledState);
+  }
+}
+
+String digitalClock()
+{
+  // digital clock display of the time
+  String result;
+  result = printDigits(hour()) + ":" + printDigits(minute()) + ":" + printDigits(second());
+  return result;
+}
+
+String digitalDate()
+{
+  // digital clock display of the time
+  String result;
+  result = printDigits((day())) + "/"  + printDigits((month())) + "/" + String(year());
+  return result;
+}
+
+String printDigits(int digits)
+{
+  // utility for digital clock display: prints preceding colon and leading 0
+
+
+  String result = "";
+
+  if (digits < 10)
+  {
+    result = "0" + String(digits);
+  }
+  else {
+    result = String(digits);
+  }
+
+  //char mychar[2] = "";
+  //sprintf(mychar,"%02d",digits);
+  //result = String(mychar);
+
+  return result;
+}
+
+time_t getNtpTime()
+{
   IPAddress ntpServerIP; // NTP server's ip address
   //const int SECS_PER_HOUR = 3600;
   while (udp.parsePacket() > 0) ; // discard any previously received packets
@@ -132,9 +398,11 @@ time_t getNtpTime() {
   Serial.println(ntpServerIP);
   sendNTPpacket(ntpServerIP);
   uint32_t beginWait = millis();
-  while (millis() - beginWait < 1500) {
+  while (millis() - beginWait < 1500)
+  {
     int size = udp.parsePacket();
-    if (size >= NTP_PACKET_SIZE) {
+    if (size >= NTP_PACKET_SIZE)
+    {
       Serial.println("Receive NTP Response");
       udp.read(packetBuffer, NTP_PACKET_SIZE);  // read packet into the buffer
       unsigned long secsSince1900;
@@ -152,161 +420,9 @@ time_t getNtpTime() {
   return 0; // return 0 if unable to get the time
 }
 
-void Reedswitchfunction() {
-  if ((long)(micros() - last_micros) >= debouncing_time * 1000) {
-    Serial.println(printDigits(hour()) + ":" + printDigits(minute()) + ":" + printDigits(second()) + ": Reed Switch !");
-    last_micros = micros();
-  }
-  else {
-    Serial.println("Debounce");
-  }
-}
-
-void LDRfunction() {
-  if ((long)(micros() - last_micros) >= debouncing_time * 1000) {
-    LDRBlink++;
-    Serial.println(printDigits(hour()) + ":" + printDigits(minute()) + ":" + printDigits(second()) + ":  LDR !" + String(LDRBlink));
-
-    flashrate = (micros() - TimeLastblinked) / LDRBlinksPerKWH;
-
-    if (flashrate > 0) {
-      PowerKW = 3600 / flashrate; //Power (kW) = 3600 (secs in 1hr) divided by (the seconds between flashes * number of Imp/kWh printed on meter)
-      Serial.println("Flashrate = " + String(flashrate));
-      Serial.println("PowerKW = " + String(PowerKW));
-    }
-    TimeLastblinked = micros();
-
-
-    if (LDRBlink == LDRBlinksPerKWH) {
-      LDRBlink = 1;
-      NumberOfKWH++;
-      Serial.println("LDRcounter = LDRBlinksPerKWH reset counter");
-    }
-    last_micros = micros();
-  }
-  else {
-    Serial.println("Debounce");
-  }
-}
-
-void setup () {
-  interrupts();
-  sei ();
-
-
-  //pinMode ( led, OUTPUT );
-  //digitalWrite ( led, 0 );
-
-  pinMode(ReedswitchPin, INPUT_PULLUP); //D0
-  attachInterrupt(digitalPinToInterrupt(ReedswitchPin), Reedswitchfunction, CHANGE);
-
-  pinMode(LDRPin, INPUT_PULLUP); //D1
-  attachInterrupt(digitalPinToInterrupt(LDRPin), LDRfunction, CHANGE);
-
-
-  Serial.begin ( 115200 );
-  WiFi.mode ( WIFI_STA );
-  WiFi.begin ( ssid, password );
-  Serial.println ( "" );
-  // Wait for connection
-  while ( WiFi.status() != WL_CONNECTED ) {
-    delay ( 500 );
-    Serial.print ( "." );
-  }
-  Serial.println ( "" );
-  Serial.print ( "Connected to " );
-  Serial.println ( ssid );
-  Serial.print ( "IP address: " );
-  Serial.println ( WiFi.localIP() );
-  if ( MDNS.begin ( "esp8266" ) ) {
-    Serial.println ( "MDNS responder started" );
-  }
-  Serial.println("Starting UDP");
-  udp.begin(localPort);
-  Serial.print("Local port: ");
-  Serial.println(udp.localPort());
-  setSyncProvider(getNtpTime);
-  setSyncInterval(300);
-  server.on ( "/", handleRoot );
-  server.on ( "/test.svg", drawGraph );
-  server.on ( "/inline", []() {
-    server.send ( 200, "text/plain", "this works as well" );
-  } );
-  server.onNotFound ( handleNotFound );
-  server.begin();
-  Serial.println ( "HTTP server started" );
-}
-
-time_t prevDisplay = 0; // when the digital clock was displayed
-
-
-void loop () {
-  server.handleClient();
-  //Serial.println("Result:" + getNtpTime());
-  if (timeStatus() != timeNotSet) {
-    if (now() != prevDisplay) { //update the display only if time has changed
-      prevDisplay = now();
-      digitalClock();
-    }
-  }
-  //int ReedSwitch = 0;
-  //ReedSwitch = digitalRead(16);
-  //Serial.println("Reed Switch :" + String(ReedSwitch));
-
-  //int LDR = 0;
-  //LDR = digitalRead(5);
-  //Serial.println("LDR :" + String(LDR));
-}
-
-String digitalClock() {
-  // digital clock display of the time
-  String result;
-  result = printDigits(hour()) + ":" + printDigits(minute()) + ":" + printDigits(second());
-  return result;
-}
-
-String digitalDate() {
-  // digital clock display of the time
-  String result;
-  result = printDigits((day())) + "/"  + printDigits((month())) + "/" + String(year());
-  return result;
-}
-
-String printDigits(int digits) {
-  // utility for digital clock display: prints preceding colon and leading 0
-  String result;
-  if (digits < 10) {
-    result = "0" + String(digits);
-  }
-  else {
-    result = String(digits);
-  }
-  return result;
-}
-
-
-
-
-void drawGraph() {
-  String out = "";
-  char temp[100];
-  out += "<svg xmlns=\"http://www.w3.org/2000/svg\" version=\"1.1\" width=\"400\" height=\"150\">\n";
-  out += "<rect width=\"400\" height=\"150\" fill=\"rgb(250, 230, 210)\" stroke-width=\"1\" stroke=\"rgb(0, 0, 0)\" />\n";
-  out += "<g stroke=\"black\">\n";
-  int y = rand() % 130;
-  for (int x = 10; x < 390; x += 10) {
-    int y2 = rand() % 130;
-    sprintf(temp, "<line x1=\"%d\" y1=\"%d\" x2=\"%d\" y2=\"%d\" stroke-width=\"1\" />\n", x, 140 - y, x + 10, 140 - y2);
-    out += temp;
-    y = y2;
-  }
-  out += "</g>\n</svg>\n";
-
-  server.send ( 200, "image/svg+xml", out);
-}
-
 // send an NTP request to the time server at the given address
-void sendNTPpacket(IPAddress &address) {
+void sendNTPpacket(IPAddress &address)
+{
   // set all bytes in the buffer to 0
   memset(packetBuffer, 0, NTP_PACKET_SIZE);
   // Initialize values needed to form NTP request
@@ -326,5 +442,3 @@ void sendNTPpacket(IPAddress &address) {
   udp.write(packetBuffer, NTP_PACKET_SIZE);
   udp.endPacket();
 }
-
-
